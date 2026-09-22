@@ -110,3 +110,27 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+uint64
+sys_interpose(void) {
+  int mask;
+  char path[MAXPATH];
+  struct proc *p = myproc();
+
+  // 已安装 sandbox后，不能由被限制的程序重新配置
+  if (p->sandboxed) {
+    return -1;
+  }
+
+  argint(0, &mask);
+  //第二个参数是用户态字符串地址
+  if(argstr(1, path, sizeof(path)) < 0) {
+    return -1;
+  }
+
+  p->sandboxed = 1;
+  p->mask = mask;
+  safestrcpy(p->allowed_path, path, sizeof(p->allowed_path));
+
+  return 0;
+}

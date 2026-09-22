@@ -37,6 +37,7 @@ uservec:
         li a0, TRAPFRAME
         
         # save the user registers in TRAPFRAME
+        # 保存用户寄存器
         sd ra, 40(a0)
         sd sp, 48(a0)
         sd gp, 56(a0)
@@ -73,22 +74,28 @@ uservec:
         sd t0, 112(a0)
 
         # initialize kernel stack pointer, from p->trapframe->kernel_sp
+        # 设置内核栈指针
         ld sp, 8(a0)
 
         # make tp hold the current hartid, from p->trapframe->kernel_hartid
+        # tp 在 xv6 内核中保存当前 hart ID。
         ld tp, 32(a0)
 
         # load the address of usertrap(), from p->trapframe->kernel_trap
+        #  t0 = 将来要跳转的内核 C 函数地址
         ld t0, 16(a0)
 
         # fetch the kernel page table address, from p->trapframe->kernel_satp.
+        # 切换页表  t1 = 内核页表对应的satp
         ld t1, 0(a0)
 
         # wait for any previous memory operations to complete, so that
         # they use the user page table.
+        # 确保此前的虚拟内存访问完成  刷新可能过期的TLB翻译缓存
         sfence.vma zero, zero
 
         # install the kernel page table.
+        # 把t1中的内核页表配置写进satp
         csrw satp, t1
 
         # flush now-stale user entries from the TLB.
@@ -107,6 +114,7 @@ userret:
         fence.i
 
         # switch to the user page table.
+        # 切换回用户页表
         sfence.vma zero, zero
         csrw satp, a0
         sfence.vma zero, zero

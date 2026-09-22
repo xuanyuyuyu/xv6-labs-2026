@@ -18,7 +18,7 @@ main(int argc, char *argv[])
 {
   int i;
   int n = 2;
-  int mask = 1;
+  int mask = 1;  //mask 参数在 argv 中的位置
   char *nargv[MAXARG];
 
   if (argc < 4) {
@@ -31,7 +31,7 @@ main(int argc, char *argv[])
 
   n += 1; // skip path
 
-  // strip off the first n arguments to sandbox
+  // 把前面的n个参数删掉
   for (i = n; i < argc && i < MAXARG; i++) {
     nargv[i - n] = argv[i];
   }
@@ -43,6 +43,7 @@ main(int argc, char *argv[])
     exit(1);
   }
   if (pid == 0) {
+    //子进程
     if (interpose(atoi(argv[mask]), argv[mask + 1]) < 0) {
       printf("%s: interpose failed", argv[0]);
       exit(1);

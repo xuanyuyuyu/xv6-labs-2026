@@ -80,6 +80,17 @@ argstr(int n, char *buf, int max)
   return fetchstr(addr, buf, max);
 }
 
+static int path_allowed(struct proc *p) {
+  char path[MAXPATH];
+
+  // open(path, ...)  exec(path, ...)
+  if(argstr(0, path, sizeof(path)) < 0) {
+    return 0;
+  }
+  return strncmp(path, p->allowed_path, MAXPATH) == 0;
+}
+
+
 // Prototypes for the functions that handle system calls.
 extern uint64 sys_fork(void);
 extern uint64 sys_exit(void);
@@ -103,6 +114,7 @@ extern uint64 sys_link(void);
 extern uint64 sys_mkdir(void);
 extern uint64 sys_close(void);
 extern uint64 sys_sync(void);
+extern uint64 sys_interpose(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -130,6 +142,7 @@ static uint64 (*syscalls[])(void) = {
   [SYS_mkdir]   = sys_mkdir,
   [SYS_close]   = sys_close,
   [SYS_sync]    = sys_sync,
+  [SYS_interpose] = sys_interpose,
   // clang-format on
 };
 
@@ -140,10 +153,19 @@ syscall(void)
   struct proc *p = myproc();
 
   num = p->trapframe->a7;
+
   if (num > 0 && num < NELEM(syscalls) && syscalls[num]) {
     // Use num to lookup the system call function for num, call it,
     // and store its return value in p->trapframe->a0
-    p->trapframe->a0 = syscalls[num]();
+    if(p->mask & (1U << num)) {
+      if((num == SYS_open || num == SYS_exec) && path_allowed(p)) {
+        p->trapframe->a0 = syscalls[num]();
+      } else {
+        p->trapframe->a0 = -1;
+      }
+    } else {
+      p->trapframe->a0 = syscalls[num]();
+    }
   } else {
     printk("%d %s: unknown sys call %d\n", p->pid, p->name, num);
     p->trapframe->a0 = -1;
