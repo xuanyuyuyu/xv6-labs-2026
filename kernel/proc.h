@@ -26,6 +26,7 @@ struct cpu {
   int intena;             // Were interrupts enabled before push_off()?
 };
 
+
 extern struct cpu cpus[NCPU];
 
 // per-process data for the trap handling code in trampoline.S.
@@ -101,4 +102,5 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  struct usyscall *usyscall;
 };

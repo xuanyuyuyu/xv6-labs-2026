@@ -123,6 +123,14 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  p->usyscall = (struct usyscall *)kalloc();
+  if(p->usyscall == 0) {
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+  memset(p->usyscall, 0, PGSIZE);
+  p->usyscall->pid = p->pid;
 
   // Allocate a trapframe page.
   if ((p->trapframe = (struct trapframe *)kalloc()) == 0) {
@@ -146,8 +154,8 @@ found:
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
-  p->context.ra = (uint64)forkret;
-  p->context.sp = p->kstack + PGSIZE;
+  p->context.ra = (uint64)forkret; //让新进程从forkret开始执行
+  p->context.sp = p->kstack + PGSIZE;  //让它使用自己的内核栈
 
   return p;
 }
@@ -163,6 +171,11 @@ freeproc(struct proc *p)
   p->trapframe = 0;
   if (p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
+#ifdef LAB_PGTBL
+  if(p->usyscall)
+    kfree((void *)p->usyscall);
+  p->usyscall = 0;
+#endif
   p->pagetable = 0;
   p->sz = 0;
   p->pid = 0;
@@ -204,7 +217,16 @@ proc_pagetable(struct proc *p)
     return 0;
   }
 
-
+#ifdef LAB_PGTBL
+  if (mappages(pagetable, USYSCALL, PGSIZE, (uint64)p->usyscall, PTE_R | PTE_U) < 0) {
+    //建表失败：清理已建立的映射和页表结构
+    //物理页仍由 freeproc() 负责释放
+    uvmunmap(pagetable, TRAPFRAME, 1, 0);
+    uvmunmap(pagetable, TRAMPOLINE, 1, 0);
+    uvmfree(pagetable, 0);
+    return 0;
+  }
+#endif
   return pagetable;
 }
 
@@ -215,6 +237,9 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
 {
   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
   uvmunmap(pagetable, TRAPFRAME, 1, 0);
+#ifdef LAB_PGTBL
+  uvmunmap(pagetable, USYSCALL, 1, 0);
+#endif
   uvmfree(pagetable, sz);
 }
 

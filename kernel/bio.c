@@ -93,7 +93,7 @@ bread(uint dev, uint blockno)
 {
   struct buf *b;
 
-  b = bget(dev, blockno);
+  b = bget(dev, blockno);  //先从缓存中读取
   if (!b->valid) {
     virtio_disk_rw(b, 0);
     b->valid = 1;

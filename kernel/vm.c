@@ -26,10 +26,11 @@ kvmmake(void)
   kpgtbl = (pagetable_t)kalloc();
   memset(kpgtbl, 0, PGSIZE);
 
-  // uart registers
+  // uart registers  UART0：串口设备寄存器的起始地址
+  // 参数：页表，虚拟地址，物理地址，字节数，权限
   kvmmap(kpgtbl, UART0, UART0, PGSIZE, PTE_R | PTE_W);
 
-  // virtio mmio disk interface
+  // virtio mmio disk interface  VIRTIO0磁盘设备接口的起始地址
   kvmmap(kpgtbl, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
 
 #ifdef LAB_NET
@@ -148,13 +149,119 @@ walkaddr(pagetable_t pagetable, uint64 va)
 
 
 #if defined(LAB_PGTBL) || defined(SOL_MMAP) || defined(SOL_COW)
+
+static void vmprint_walk(pagetable_t pagetable, int level, uint64 va_base) {
+  for(int i = 0; i < 512; i ++) {
+    pte_t pte = pagetable[i];
+    if((pte & PTE_V) == 0)
+      continue;  //无效页表项
+    
+    //计算当前层索引在虚拟地址中的位置：
+    //L2 左移 30， L1 左移 21， L0 左移动 12位。
+    //先转换成uint64，避免使用32位整数计算高地址
+    uint64 va = va_base | ((uint64)i << (12 + 9 * level));
+    
+    //对叶子项，这是映射的物理页起始地址
+    //对非叶子项，这是下级页表的物理地址
+    uint64 pa = PTE2PA(pte);
+    
+    //打印.. 区分层级
+    for(int depth = 0; depth < 3 - level; depth ++)
+      printk(" ..");
+
+    printk("%p: pte %p pa %p ", (void *)va, (void *)pte, (void *)pa);
+
+    // 按 R、W、X、U 的顺序打印权限。
+    if (pte & PTE_R)
+      printk("R");
+    if (pte & PTE_W)
+      printk("W");
+    if (pte & PTE_X)
+      printk("X");
+    if (pte & PTE_U)
+      printk("U");
+    if(level == 1 && PTE_LEAF(pte)) 
+      printk(" (superpage)");
+    printk("\n");
+
+    if(level > 0 && !PTE_LEAF(pte)) 
+      vmprint_walk((pagetable_t)pa, level - 1, va);
+
+  }
+}
+
+
 void
 vmprint(pagetable_t pagetable)
 {
-  // your code here
+  //打印根页表地址，然后从 L2 开始遍历
+  printk("page table %p\n", (void *)pagetable);
+  vmprint_walk(pagetable, 2, 0);
 }
 #endif
 
+
+static pte_t *kvmwalk1(pagetable_t pagetable, uint64 va) {
+  if(va >= MAXVA) 
+    panic("kvmwalk1");
+
+  //找到 L2 中对应的项
+  pte_t *pte = &pagetable[PX(2, va)];
+
+  if(*pte & PTE_V) {
+    if(PTE_LEAF(*pte))
+      panic("kvmwalk1: leaf");
+    
+    pagetable = (pagetable_t)PTE2PA(*pte);
+  } else {
+    //缺少L1页表，分配并清零
+    pagetable_t child = (pagetable_t)kalloc();
+    if(child == 0)
+      return 0;
+    memset(child, 0, PGSIZE);
+
+    //只设置有效位，表示指向下级页表
+    *pte = PA2PTE(child) | PTE_V;
+    pagetable = child;
+  }
+  //返回L1中的槽位，交给映射函数填写
+  return &pagetable[PX(1, va)];
+}
+
+// 为内核建立映射：能用 2 MiB 大页时优先使用，否则用 4 KiB
+static int kvmmappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm) {
+  if(size == 0 || va % PGSIZE != 0 || pa % PGSIZE || size % PGSIZE != 0)
+    panic("kvmmappages: alignment");
+
+  if (va >= MAXVA || size > MAXVA - va)
+    panic("kvmappages: range");
+  
+  while(size > 0) {
+    uint64 step;
+
+    if(va % SUPERPGSIZE == 0 && pa % SUPERPGSIZE == 0 && size >= SUPERPGSIZE) {
+      //地址对齐且空间足够：在 L1 建立一个大页映射
+      pte_t *pte = kvmwalk1(pagetable, va);
+      if(pte == 0)
+        return -1;
+      
+      if(*pte & PTE_V)
+        panic("kvmmappages: remap");
+      *pte = PA2PTE(pa) | perm | PTE_V;
+      step = SUPERPGSIZE;
+    } else {
+      //不满足大页条件：复用原函数映射一个普通页
+      if(mappages(pagetable, va, PGSIZE, pa, perm) < 0) {
+        return -1;
+      }
+      step = PGSIZE;
+    }
+    va += step;
+    pa += step;
+    size -= step;
+  }
+  return 0;
+}
 
 // add a mapping to the kernel page table.
 // only used when booting.
@@ -162,7 +269,7 @@ vmprint(pagetable_t pagetable)
 void
 kvmmap(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz, int perm)
 {
-  if (mappages(kpgtbl, va, sz, pa, perm) != 0)
+  if (kvmmappages(kpgtbl, va, sz, pa, perm) != 0)
     panic("kvmmap");
 }
 
@@ -190,7 +297,7 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
   a = va;
   last = va + size - PGSIZE;
   for (;;) {
-    if ((pte = walk(pagetable, a, 1)) == 0)
+    if ((pte = walk(pagetable, a, 1)) == 0)  //walk沿页表逐级查找，返回对应页表项的地址
       return -1;
     if (*pte & PTE_V)
       panic("mappages: remap");
@@ -200,6 +307,7 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
     a += PGSIZE;
     pa += PGSIZE;
   }
+  
   return 0;
 }
 // create an empty user page table.
