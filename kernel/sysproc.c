@@ -22,6 +22,41 @@ sys_getpid(void)
   return myproc()->pid;
 }
 
+// 注册提醒规则；这里只保存地址，不在内核中调用用户函数。
+uint64
+sys_sigalarm(void)
+{
+  int interval;
+  uint64 handler;
+  argint(0, &interval);
+  argaddr(1, &handler);
+  if (interval < 0 || handler >= MAXVA)
+    return -1;
+
+  struct proc *p = myproc();
+  p->alarm_interval = interval;
+  p->alarm_handler = handler;
+  p->alarm_ticks = 0;
+  // handler 内可以关闭提醒，但不能因此丢掉正在使用的现场备份。
+  return 0;
+}
+
+// handler 结束时恢复原来的执行位置和全部用户通用寄存器。
+uint64
+sys_sigreturn(void)
+{
+  struct proc *p = myproc();
+  if (!p->alarm_active)
+    return -1;
+
+  *p->trapframe = p->alarm_saved;
+  p->alarm_active = 0;
+
+  // syscall() 会将本函数返回值写入 trapframe->a0。
+  // 返回恢复后的 a0，避免它被覆盖成普通的成功值 0。
+  return p->trapframe->a0;
+}
+
 uint64
 sys_fork(void)
 {
@@ -70,6 +105,8 @@ sys_pause(void)
   int n;
   uint ticks0;
 
+  backtrace(); 
+  
   argint(0, &n);
   if (n < 0)
     n = 0;

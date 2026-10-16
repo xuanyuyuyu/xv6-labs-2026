@@ -81,9 +81,21 @@ usertrap(void)
   if (killed(p))
     kexit(-1);
 
-  // give up the CPU if this is a timer interrupt.
-  if (which_dev == 2)
+  // 仅在用户态触发的时钟中断中计数；handler 执行期间暂停计数。
+  if (which_dev == 2) {
+    if (p->alarm_interval > 0 && !p->alarm_active) {
+      p->alarm_ticks++;
+      if (p->alarm_ticks >= p->alarm_interval) {
+        p->alarm_ticks = 0;
+        // 必须先备份，再修改 epc；否则原执行位置就丢失了。
+        p->alarm_saved = *p->trapframe;
+        p->alarm_active = 1;
+        p->trapframe->epc = p->alarm_handler;  //epc保存：返回用户态时，从哪条指令继续执行
+      }
+    }
+    // 仍保留原有的调度行为。
     yield();
+  }
 
   prepare_return();
 
@@ -115,7 +127,7 @@ prepare_return(void)
   // the process next traps into the kernel.
   p->trapframe->kernel_satp = r_satp();         // kernel page table
   p->trapframe->kernel_sp = p->kstack + PGSIZE; // process's kernel stack
-  p->trapframe->kernel_trap = (uint64)usertrap;
+  p->trapframe->kernel_trap = (uint64)usertrap; //跳到C函数usertrap处理事件
   p->trapframe->kernel_hartid = r_tp(); // hartid for cpuid()
 
   // set up the registers that trampoline.S's sret will use

@@ -97,6 +97,11 @@ struct proc {
   uint64 sz;                   // Size of process memory (bytes)
   pagetable_t pagetable;       // User page table
   struct trapframe *trapframe; // data page for trampoline.S
+  int alarm_interval;          // 提醒间隔；0 表示关闭。
+  int alarm_ticks;             // 上次提醒后累计的用户态时钟 tick。
+  uint64 alarm_handler;        // 用户处理函数地址；0 也可能是合法入口。
+  int alarm_active;            // 正在处理 alarm，防止重复进入。
+  struct trapframe alarm_saved; // 被打断的原用户现场，不映射给用户。
   struct context context;      // swtch() here to run process
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory

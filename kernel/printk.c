@@ -135,11 +135,44 @@ printk(char *fmt, ...)
 }
 
 void
+backtrace(void){
+  uint64 fp = r_fp();
+
+  //固定当前内核栈的范围，后续不随fp改变 (内核进程栈只被映射到了一页)
+  uint64 bottom = PGROUNDDOWN(fp);
+  uint64 top = bottom + PGSIZE;
+  
+  printk("backtrace:\n");
+
+  // fp 可以等于top， 但fp-8 和fp-16必须在栈页内
+  while(fp >= bottom + 16 && fp <= top) {
+    if(fp % 16 != 0)
+      break;
+
+    //ra保存返回地址
+    uint64 ra = *(uint64 *)(fp - 8);
+    //prev_fp保存调用者的帧指针
+    uint64 prev_fp = *(uint64 *)(fp - 16);
+
+    printk("%p\n", (void *)ra);
+
+    if(prev_fp <= fp || prev_fp > top)
+      break;
+
+    fp = prev_fp;
+  }
+
+}
+
+void
 panic(char *s)
 {
   panicking = 1;
   printk("panic: ");
   printk("%s\n", s);
+
+  backtrace();
+
   panicked = 1; // freeze uart output from other CPUs
   for (;;)
     ;
