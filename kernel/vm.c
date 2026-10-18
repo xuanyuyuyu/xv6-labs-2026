@@ -298,30 +298,39 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 int
 uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
-  pte_t *pte;
-  uint64 pa, i;
-  uint flags;
-  char *mem;
+  uint64 i;
+  
+  for(i = 0; i < sz; i += PGSIZE) {
+    pte_t *pte = walk(old, i, 0);
 
-  for (i = 0; i < sz; i += PGSIZE) {
-    if ((pte = walk(old, i, 0)) == 0)
-      continue; // page table entry hasn't been allocated
-    if ((*pte & PTE_V) == 0)
-      continue; // physical page hasn't been allocated
-    pa = PTE2PA(*pte);
-    flags = PTE_FLAGS(*pte);
-    if ((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char *)pa, PGSIZE);
-    if (mappages(new, i, PGSIZE, (uint64)mem, flags) != 0) {
-      kfree(mem);
+    //懒分配可能产生没有实际映射的页面，跳过
+    if(pte == 0 || (*pte & PTE_V) == 0) 
+      continue;
+    uint64 pa = PTE2PA(*pte);
+    uint flags = PTE_FLAGS(*pte);
+
+    //原本可写的页面变成只读，并标记cow
+    //原本只读的代码页不能新增cow
+    if(flags & PTE_W) {
+      flags = (flags & ~PTE_W) | PTE_COW;  //清除可写标志，并告诉内核原本允许写
+      *pte = PA2PTE(pa) | flags; //把修改后的标志写回父进程的页表项
+    }
+    
+    //子进程共享物理页，新增一个引用
+    krefinc(pa);
+
+    if(mappages(new, i, PGSIZE, pa, flags) != 0) {
+      //映射失败，撤销引用
+      kfree((void *)pa);
       goto err;
     }
   }
+  sfence_vma();
   return 0;
 
 err:
   uvmunmap(new, 0, i / PGSIZE, 1);
+  sfence_vma();
   return -1;
 }
 
@@ -360,13 +369,26 @@ copyout(pagetable_t pagetable, uint64 psz, uint64 dstva, char *src, uint64 len)
     }
 
     pte = walk(pagetable, va0, 0);
-    // forbid copyout over read-only user text pages.
-    if ((*pte & PTE_W) == 0)
+   
+    if(pa0 == 0 || (pte != 0 && (*pte & PTE_COW))) {
+      pa0 = vmfault(pagetable, psz, va0, 0);
+      if(pa0 == 0)
+        return -1;
+    }
+
+    //映射可能被更新，重新检查
+    pte = walk(pagetable, va0, 0);
+    if (pte == 0 ||
+        (*pte & PTE_V) == 0 ||
+        (*pte & PTE_U) == 0 ||
+        (*pte & PTE_W) == 0)
       return -1;
 
+      // 本轮复制不能越过当前页边界。
     n = PGSIZE - (dstva - va0);
     if (n > len)
       n = len;
+
     memmove((void *)(pa0 + (dstva - va0)), src, n);
 
     len -= n;
@@ -451,32 +473,90 @@ copyinstr(pagetable_t pagetable, uint64 psz, char *dst, uint64 srcva,
   }
 }
 
+static uint64 cowfault(pagetable_t pagetable, uint64 va) {
+  if(va >= MAXVA)
+    return 0;
+  va = PGROUNDDOWN(va);
+
+  pte_t *pte = walk(pagetable, va, 0);
+
+  //必须是有效的，允许用户访问的cow页
+  if (pte == 0 ||
+      (*pte & PTE_V) == 0 ||
+      (*pte & PTE_U) == 0 ||
+      (*pte & PTE_COW) == 0)
+    return 0;
+  
+  uint64 pa = PTE2PA(*pte);
+  uint flags = PTE_FLAGS(*pte);
+
+  //1.分配当前进程自己的物理页
+  char *mem = kalloc();
+  if(mem == 0)
+    return 0;
+  
+  //2.复制旧页的全部内容
+  memmove(mem, (void *)pa, PGSIZE);
+
+  //3.新页恢复可写，清除cow标记
+  flags = (flags | PTE_W) & ~PTE_COW;
+
+  //4.将当前进程的映射改为指向新页
+  *pte = PA2PTE((uint64)mem) | flags;
+
+  //刷新CPU的TLB
+  sfence_vma();
+
+  //5.当前进程不再使用旧页，减少旧页引用
+  kfree((void *)pa);
+
+  return (uint64)mem;
+}
+
+
 // allocate and map user memory if process is referencing a page
 // that was lazily allocated in sys_sbrk().
 // returns 0 if va is invalid or already mapped, or if
 // out of physical memory, and physical address if successful.
 uint64
-vmfault(pagetable_t pagetable, uint64 psz, uint64 va, int read)
+vmfault(pagetable_t pagetable, uint64
+psz, uint64 va, int read)
 {
-  uint64 mem;
-
-  if (va >= psz)
+  if (va >= psz || va >= MAXVA)
     return 0;
+
   va = PGROUNDDOWN(va);
-  if (ismapped(pagetable, va)) {
+
+  pte_t *pte = walk(pagetable, va,
+  0);
+
+  if (pte != 0 && (*pte & PTE_V)) {
+    // read == 0 表示写缺页。
+    // 已映射且为 COW 的用户页，可以通过复制解决。
+    if (!read && (*pte & PTE_COW))
+      return cowfault(pagetable, va);
+
+    // 真正只读的页面等权限异常不能放行。
     return 0;
   }
-  mem = (uint64)kalloc();
+
+  // 没有映射的页面：保留原来的懒分配逻辑。
+  char *mem = kalloc();
   if (mem == 0)
     return 0;
-  memset((void *)mem, 0, PGSIZE);
-  if (mappages(pagetable, va, PGSIZE, mem, PTE_W | PTE_U | PTE_R) != 0) {
-    kfree((void *)mem);
+
+  memset(mem, 0, PGSIZE);
+
+  if (mappages(pagetable, va, PGSIZE,
+  (uint64)mem,
+                PTE_W | PTE_U |
+                PTE_R) != 0) {
+    kfree(mem);
     return 0;
   }
-  return mem;
-}
 
+  return (uint64)mem;
+}
 int
 ismapped(pagetable_t pagetable, uint64 va)
 {
